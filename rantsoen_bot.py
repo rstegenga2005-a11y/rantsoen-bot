@@ -1,30 +1,14 @@
 #!/usr/bin/env python3
-"""
-Rantsoen Bot voor Telegram
-==========================
-Stuur in de groep bijv:
-  hendrik 7500
-  meile 10000
-  meile 10500 extra 400
-  droog 3000 stal1 1200
-
-De bot rekent automatisch uit hoeveel van elk ingrediënt je nodig hebt.
-"""
-
 import logging
 import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-logging.basicConfig(
-    format="%(asctime)s %(levelname)s %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 
-# ─── Rantsoenen (verhoudingen op basis van referentietotaal) ───────────
 RANTSOENEN = {
     "hendrik": {
-        "naam":  "Melkkoeien \u2014 Hendrik",
+        "naam": "Melkkoeien \u2014 Hendrik",
         "split": False,
         "ing": [
             ("KUIPER EASTEREIN ML",      570),
@@ -36,7 +20,7 @@ RANTSOENEN = {
         ],
     },
     "meile": {
-        "naam":  "Melkkoeien \u2014 Meile",
+        "naam": "Melkkoeien \u2014 Meile",
         "split": False,
         "ing": [
             ("KUIPER REAHUUS ML O",       755),
@@ -48,7 +32,7 @@ RANTSOENEN = {
         ],
     },
     "droog": {
-        "naam":  "Droogstaande koeien",
+        "naam": "Droogstaande koeien",
         "split": True,
         "ing": [
             ("Grote sleufsilo 2025",     1354),
@@ -60,122 +44,80 @@ RANTSOENEN = {
     },
 }
 
-# Korte namen die de bot herkent
 ALIASSEN = {
     "hendrik": "hendrik", "henk": "hendrik", "h": "hendrik",
     "meile":   "meile",   "m":    "meile",
     "droog":   "droog",   "droge":"droog",   "d": "droog",
 }
 
+def fmt(n):
+    return f"{round(n):,}".replace(",", ".")
+
+def bereken(sleutel, totaal_kg, extra_kg=0, stal1=None):
+    r = RANTSOENEN[sleutel]
+    basis = sum(k for _, k in r["ing"])
+    factor = (totaal_kg + extra_kg) / basis if basis > 0 else 0
+
+    lopend = 0
+    regels = []
+    for naam, b in r["ing"]:
+        adj = b * factor
+        lopend += adj
+        regels.append(
+            f"*{naam}*\n"
+            f"`{fmt(adj)} kg`  \u2192  totaal `{fmt(lopend)} kg`"
+        )
+
+    totaal = totaal_kg + extra_kg
+    subtitel = f"_{fmt(totaal_kg)} kg"
+    if extra_kg > 0:
+        subtitel += f" + {fmt(extra_kg)} kg kalveren"
+    subtitel += "_"
+
+    tekst = (
+        f"\U0001f33e *{r['naam']}*\n"
+        f"{subtitel}\n"
+        f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+        + "\n\n".join(regels)
+        + f"\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+        f"\U0001f4e6 *Totaal:  {fmt(totaal)} kg*"
+    )
+
+    if r["split"] and stal1 is not None:
+        stal2 = max(0, round(totaal) - stal1)
+        tekst += (
+            f"\n\n\U0001f3d7 *Verdeling stallen*\n"
+            f"Stal 1 \u2192 `{fmt(stal1)} kg`\n"
+            f"Stal 2 \u2192 `{fmt(stal2)} kg`"
+        )
+
+    return tekst
+
 HELP = (
-    "\U0001f33e *Rantsoen Bot \u2014 hoe werkt het?*\n\n"
-    "Stuur de naam van de stal en het totaal aantal kg dat je wilt voeren:\n\n"
+    "\U0001f33e *Rantsoen Bot*\n\n"
+    "Stuur de stal en het totaal kg:\n\n"
     "`hendrik 7500`\n"
     "`meile 10000`\n"
-    "`droog 3000`\n\n"
-    "Extra kuil voor kalveren bij Meile:\n"
-    "`meile 10000 extra 400`\n\n"
-    "Verdeling over stallen bij droge koeien:\n"
-    "`droog 3000 stal1 1200`\n\n"
-    "Kortere namen werken ook: `h`, `m`, `d`\n\n"
+    "`meile 10000 extra 400`  \u2190 kalveren\n"
+    "`droog 3000`\n"
+    "`droog 3000 stal1 1200`  \u2190 verdeling\n\n"
+    "Korte namen werken ook: `h` `m` `d`\n\n"
     "Stuur `help` voor dit bericht."
 )
 
-
-def fmt(n):
-    """Getal netjes afronden — geen decimalen tenzij nodig."""
-    r = round(n, 1)
-    return str(int(r)) if r == int(r) else str(r)
-
-
-def bereken(sleutel: str, totaal_kg: float, extra_kg: float = 0, stal1: int = None) -> str:
-    """
-    Rekent het rantsoen terug vanuit het gewenste totaal kg.
-    De verhouding van de ingrediënten blijft altijd exact gelijk.
-    Optioneel: extra_kg wordt proportioneel meegenomen (Meile / kalveren).
-    Optioneel: stal1 geeft de verdeling voor droge koeien.
-    """
-    r = RANTSOENEN[sleutel]
-    basis_totaal = sum(k for _, k in r["ing"])
-
-    # Factor op basis van gewenst totaal (inclusief eventuele extra)
-    gewenst = totaal_kg + extra_kg
-    factor  = gewenst / basis_totaal if basis_totaal > 0 else 0
-
-    # Ingrediënten berekenen
-    max_len  = max(len(n) for n, _ in r["ing"])
-    lopend   = 0
-    regels   = []
-
-    for naam, basis in r["ing"]:
-        adj     = basis * factor
-        lopend += adj
-        pad_naam = naam.ljust(max_len)
-        regels.append(
-            f"  {pad_naam}  {fmt(adj):>6} kg  \u2192 {fmt(lopend):>7} kg"
-        )
-
-    lijn = "\u2500" * (max_len + 24)
-
-    # Opbouw antwoord
-    lines = [
-        f"\U0001f33e *{r['naam']}*",
-        f"_Totaal: {fmt(totaal_kg)} kg"
-        + (f" + {fmt(extra_kg)} kg kalveren" if extra_kg > 0 else "") + "_",
-        "",
-        "```",
-        f"  {'Ingrediënt':<{max_len}}  {'kg':>6}      {'Totaal':>8}",
-        lijn,
-    ]
-    lines.extend(regels)
-    lines += [
-        lijn,
-        f"  {'TOTAAL':<{max_len}}  {fmt(gewenst):>6} kg",
-        "```",
-    ]
-
-    # Stalverdeling bij droge koeien
-    if r["split"] and stal1 is not None:
-        stal2 = max(0, round(gewenst) - stal1)
-        lines += [
-            "",
-            "\U0001f3d7 *Verdeling stallen*",
-            f"  Stal 1:  *{stal1} kg*",
-            f"  Stal 2:  *{stal2} kg*",
-        ]
-
-    return "\n".join(lines)
-
-
-def parse(tekst: str):
-    """
-    Verwerkt het ingestuurde bericht.
-    Verwacht formaat:
-      <stal> <totaal_kg> [extra <kg>] [stal1 <kg>]
-
-    Voorbeelden:
-      hendrik 7500
-      meile 10000 extra 400
-      droog 3000 stal1 1200
-      d 3000 stal1 1200
-
-    Geeft terug: (sleutel, totaal_kg, extra_kg, stal1) of None.
-    """
+def parse(tekst):
     delen = tekst.lower().strip().split()
     if len(delen) < 2:
         return None
-
     sleutel = ALIASSEN.get(delen[0])
     if not sleutel:
         return None
-
     try:
         totaal_kg = float(delen[1].replace(",", "."))
     except ValueError:
         return None
-
     extra_kg = 0
-    stal1    = None
+    stal1 = None
     i = 2
     while i < len(delen):
         if delen[i] in ("extra", "kalveren") and i + 1 < len(delen):
@@ -186,65 +128,47 @@ def parse(tekst: str):
             i += 2
         elif delen[i] in ("stal1", "stal") and i + 1 < len(delen):
             try:
-                stal1 = int(delen[i + 1].replace(",", ""))
+                stal1 = int(delen[i + 1].replace(".", "").replace(",", ""))
             except ValueError:
                 pass
             i += 2
         else:
             i += 1
-
     return sleutel, totaal_kg, extra_kg, stal1
 
-
 async def verwerk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Verwerkt elk inkomend bericht in de groep (of privé)."""
     if not update.message or not update.message.text:
         return
-
     tekst = update.message.text.strip()
-
-    # Help commando
     if tekst.lower() in ("help", "/help", "/start"):
         await update.message.reply_text(HELP, parse_mode="Markdown")
         return
-
-    # Probeer te parsen
     resultaat = parse(tekst)
     if resultaat is None:
-        # Alleen reageren als de eerste word een bekende stalnaam is
         eerste = tekst.lower().split()[0] if tekst.strip() else ""
         if eerste in ALIASSEN:
             await update.message.reply_text(
-                "\u26a0\ufe0f Ik begrijp dit niet helemaal.\n\n"
-                "Voorbeeld: `hendrik 7500` of `meile 10000 extra 400`\n"
-                "Stuur `help` voor alle opties.",
+                "\u26a0\ufe0f Voorbeeld: `hendrik 7500`\nStuur `help` voor alle opties.",
                 parse_mode="Markdown"
             )
         return
-
     sleutel, totaal_kg, extra_kg, stal1 = resultaat
-
     try:
         antwoord = bereken(sleutel, totaal_kg, extra_kg, stal1)
         await update.message.reply_text(antwoord, parse_mode="Markdown")
     except Exception as e:
-        await update.message.reply_text(f"\u26a0\ufe0f Fout bij berekening: {e}")
-
+        await update.message.reply_text(f"\u26a0\ufe0f Fout: {e}")
 
 def main():
     token = os.environ.get("TELEGRAM_TOKEN")
     if not token:
-        print("ERROR: Stel de omgevingsvariabele TELEGRAM_TOKEN in.")
-        print("Voorbeeld: export TELEGRAM_TOKEN=123456:ABCdef...")
+        print("Stel TELEGRAM_TOKEN in als omgevingsvariabele.")
         return
-
     app = ApplicationBuilder().token(token).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, verwerk))
     app.add_handler(MessageHandler(filters.COMMAND, verwerk))
-
-    print("Bot is gestart en luistert naar berichten...")
+    print("Bot gestart...")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
